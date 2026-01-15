@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ddai_core",
+  "crates/ddai_store",
+  "crates/ddai_ingest",
+  "crates/ddai_embed",
+  "crates/ddai_retrieve",
+  "crates/ddai_llm",
+  "crates/ddai_cli",
+]
