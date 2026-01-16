@@ -39,6 +39,10 @@ $metadata | Out-File -FilePath $captureFile -Encoding UTF8
 function Run-And-Capture {
     param($Command)
     
+    # Print the command being executed
+    "PS $((Get-Location).Path)> $Command" | Out-File -FilePath $captureFile -Append -Encoding UTF8
+    Write-Host "Running: $Command" -ForegroundColor Cyan
+    
     # Use Invoke-Expression to run the command directly in PowerShell instead of cmd
     try {
         $ErrorActionPreference = "Continue"
@@ -48,6 +52,9 @@ function Run-And-Capture {
     catch {
         $_.Exception.Message | Out-File -FilePath $captureFile -Append -Encoding UTF8
     }
+    
+    # Add a blank line for separation
+    "" | Out-File -FilePath $captureFile -Append -Encoding UTF8
 }
 
 # Run each command and capture output
@@ -60,6 +67,10 @@ Run-And-Capture "cargo run -p ddai_cli -- ingest .\data\raw\sample_rules.md --so
 Run-And-Capture "cargo run -p ddai_cli -- list-docs"
 Run-And-Capture "cargo run -p ddai_cli -- ingest-dnd5eapi --base-url https://www.dnd5eapi.co --limit 25 --source 'dnd5eapi.co (SRD mirror)'"
 Run-And-Capture "cargo run -p ddai_cli -- list-docs"
+Run-And-Capture "cargo run -p ddai_cli -- search 'advantage' --k 5"
+Run-And-Capture "cargo run -p ddai_cli -- search 'Armor Class' --k 5"
+Run-And-Capture "cargo run -p ddai_cli -- search 'Casting Time' --k 5"
+Run-And-Capture "cargo run -p ddai_cli -- show-chunk 1"
 
 # Add final prompt and end metadata
 "PS $((Get-Location).Path)>" | Out-File -FilePath $captureFile -Append -Encoding UTF8

@@ -49,6 +49,18 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         limit: i64,
     },
+
+    /// Search for chunks using full-text search.
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 8)]
+        k: i64,
+    },
+
+    /// Show the full content of a specific chunk.
+    ShowChunk {
+        id: i64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -71,6 +83,8 @@ fn main() -> Result<()> {
             source,
         } => ingest_dnd5eapi(base_url, limit, source),
         Command::ListDocs { limit } => list_docs(limit),
+        Command::Search { query, k } => search(query, k),
+        Command::ShowChunk { id } => show_chunk(id),
     }
 }
 
@@ -145,6 +159,33 @@ fn list_docs(limit: i64) -> Result<()> {
             d.source,
             d.title.unwrap_or_else(|| "-".into())
         );
+    }
+    Ok(())
+}
+
+fn search(query: String, k: i64) -> Result<()> {
+    let store = open_store()?;
+    let hits = store.search_chunks_fts(&query, k)?;
+    for h in hits {
+        println!(
+            "chunk:{} doc:{} entity:{:?} score:{:.3}\n  {}\n",
+            h.chunk_id, h.document_id, h.entity_id, h.score, h.snippet
+        );
+    }
+    Ok(())
+}
+
+fn show_chunk(id: i64) -> Result<()> {
+    let store = open_store()?;
+    let chunk = store.get_chunk(id)?;
+    match chunk {
+        Some(c) => {
+            println!(
+                "chunk:{} doc:{} entity:{:?}\n\n{}",
+                c.id, c.document_id, c.entity_id, c.content
+            );
+        }
+        None => println!("chunk not found: {id}"),
     }
     Ok(())
 }

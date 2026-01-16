@@ -7,7 +7,7 @@ use rusqlite::{Connection, params};
 use rusqlite::OptionalExtension;
 
 /// Current schema version for the SQLite database.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug)]
 pub struct Store {
@@ -23,6 +23,23 @@ pub struct DocumentRow {
     pub license: Option<String>,
     pub attribution: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkRow {
+    pub id: i64,
+    pub document_id: i64,
+    pub entity_id: Option<i64>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkHit {
+    pub chunk_id: i64,
+    pub document_id: i64,
+    pub entity_id: Option<i64>,
+    pub score: f64,
+    pub snippet: String,
 }
 
 impl Store {
@@ -80,6 +97,7 @@ impl Store {
             match next {
                 1 => self.migration_v1()?,
                 2 => self.migration_v2()?,
+                3 => self.migration_v3()?,
                 _ => anyhow::bail!("unknown migration version: {next}"),
             }
 
@@ -187,6 +205,47 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind);
             CREATE INDEX IF NOT EXISTS idx_chunks_entity_id ON chunks(entity_id);
+            "#,
+        )?;
+
+        Ok(())
+    }
+
+    fn migration_v3(&self) -> Result<()> {
+        // FTS5 virtual table for chunk searching.
+        // We set rowid = chunks.id so we can round-trip chunk ids easily.
+        self.conn.execute_batch(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+              content,
+              chunk_id UNINDEXED,
+              document_id UNINDEXED,
+              entity_id UNINDEXED,
+              tokenize = 'unicode61'
+            );
+
+            INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+            SELECT id, content, id, document_id, entity_id
+            FROM chunks
+            WHERE id NOT IN (SELECT rowid FROM chunks_fts);
+
+            CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+              INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+              VALUES (new.id, new.content, new.id, new.document_id, new.entity_id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+              INSERT INTO chunks_fts(chunks_fts, rowid, content, chunk_id, document_id, entity_id)
+              VALUES ('delete', old.id, old.content, old.id, old.document_id, old.entity_id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+              INSERT INTO chunks_fts(chunks_fts, rowid, content, chunk_id, document_id, entity_id)
+              VALUES ('delete', old.id, old.content, old.id, old.document_id, old.entity_id);
+
+              INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+              VALUES (new.id, new.content, new.id, new.document_id, new.entity_id);
+            END;
             "#,
         )?;
 
@@ -312,6 +371,60 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(rows)
+    }
+
+    pub fn get_chunk(&self, id: i64) -> Result<Option<ChunkRow>> {
+        let row = self
+            .conn
+            .query_row(
+                r#"
+                SELECT id, document_id, entity_id, content
+                FROM chunks
+                WHERE id = ?1
+                "#,
+                rusqlite::params![id],
+                |r| {
+                    Ok(ChunkRow {
+                        id: r.get(0)?,
+                        document_id: r.get(1)?,
+                        entity_id: r.get(2)?,
+                        content: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn search_chunks_fts(&self, query: &str, limit: i64) -> Result<Vec<ChunkHit>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              chunk_id,
+              document_id,
+              entity_id,
+              bm25(chunks_fts) AS score,
+              snippet(chunks_fts, 0, '[', ']', '…', 20) AS snip
+            FROM chunks_fts
+            WHERE chunks_fts MATCH ?1
+            ORDER BY score
+            LIMIT ?2
+            "#,
+        )?;
+
+        let hits = stmt
+            .query_map(rusqlite::params![query, limit], |r| {
+                Ok(ChunkHit {
+                    chunk_id: r.get(0)?,
+                    document_id: r.get(1)?,
+                    entity_id: r.get(2)?,
+                    score: r.get(3)?,
+                    snippet: r.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(hits)
     }
 }
 

@@ -1,0 +1,212 @@
+Next commit: fast retrieval (FTS5) + CLI search/show
+
+Before we wire Ollama into ask, let’s make sure you can reliably pull the right chunks with citations.
+
+What you’ll get
+
+SQLite FTS5 index over chunks.content
+
+ddai search "advantage" --k 8 → returns chunk_id + snippet
+
+ddai show-chunk <id> → prints full chunk (great for debugging chunking and renderers)
+
+Patch: add FTS5 search
+1) ddai_store: bump schema + add migration v3
+
+In crates/ddai_store/src/lib.rs:
+
+Change schema version
+pub const SCHEMA_VERSION: i64 = 3;
+
+Add migration_v3() and hook it into migrate()
+
+Add this to your migrations match:
+
+match next {
+    1 => self.migration_v1()?,
+    2 => self.migration_v2()?,
+    3 => self.migration_v3()?,
+    _ => anyhow::bail!("unknown migration version: {next}"),
+}
+
+
+Now add the migration:
+
+fn migration_v3(&self) -> Result<()> {
+    // FTS5 virtual table for chunk searching.
+    // We set rowid = chunks.id so we can round-trip chunk ids easily.
+    self.conn.execute_batch(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+          content,
+          chunk_id UNINDEXED,
+          document_id UNINDEXED,
+          entity_id UNINDEXED,
+          tokenize = 'unicode61'
+        );
+
+        INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+        SELECT id, content, id, document_id, entity_id
+        FROM chunks
+        WHERE id NOT IN (SELECT rowid FROM chunks_fts);
+
+        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+          INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+          VALUES (new.id, new.content, new.id, new.document_id, new.entity_id);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+          INSERT INTO chunks_fts(chunks_fts, rowid, content, chunk_id, document_id, entity_id)
+          VALUES ('delete', old.id, old.content, old.id, old.document_id, old.entity_id);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+          INSERT INTO chunks_fts(chunks_fts, rowid, content, chunk_id, document_id, entity_id)
+          VALUES ('delete', old.id, old.content, old.id, old.document_id, old.entity_id);
+
+          INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+          VALUES (new.id, new.content, new.id, new.document_id, new.entity_id);
+        END;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+2) ddai_store: add search + show helpers
+
+Still in crates/ddai_store/src/lib.rs, add:
+
+#[derive(Debug, Clone)]
+pub struct ChunkRow {
+    pub id: i64,
+    pub document_id: i64,
+    pub entity_id: Option<i64>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkHit {
+    pub chunk_id: i64,
+    pub document_id: i64,
+    pub entity_id: Option<i64>,
+    pub score: f64,
+    pub snippet: String,
+}
+
+impl Store {
+    pub fn get_chunk(&self, id: i64) -> Result<Option<ChunkRow>> {
+        let row = self
+            .conn
+            .query_row(
+                r#"
+                SELECT id, document_id, entity_id, content
+                FROM chunks
+                WHERE id = ?1
+                "#,
+                rusqlite::params![id],
+                |r| {
+                    Ok(ChunkRow {
+                        id: r.get(0)?,
+                        document_id: r.get(1)?,
+                        entity_id: r.get(2)?,
+                        content: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn search_chunks_fts(&self, query: &str, limit: i64) -> Result<Vec<ChunkHit>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              chunk_id,
+              document_id,
+              entity_id,
+              bm25(chunks_fts) AS score,
+              snippet(chunks_fts, 0, '[', ']', '…', 20) AS snip
+            FROM chunks_fts
+            WHERE chunks_fts MATCH ?1
+            ORDER BY score
+            LIMIT ?2
+            "#,
+        )?;
+
+        let hits = stmt
+            .query_map(rusqlite::params![query, limit], |r| {
+                Ok(ChunkHit {
+                    chunk_id: r.get(0)?,
+                    document_id: r.get(1)?,
+                    entity_id: r.get(2)?,
+                    score: r.get(3)?,
+                    snippet: r.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(hits)
+    }
+}
+
+3) ddai_cli: add search + show-chunk
+
+In crates/ddai_cli/src/main.rs, extend Command:
+
+Search {
+    query: String,
+    #[arg(long, default_value_t = 8)]
+    k: i64,
+},
+
+ShowChunk {
+    id: i64,
+},
+
+
+Add handlers in match:
+
+Command::Search { query, k } => search(query, k),
+Command::ShowChunk { id } => show_chunk(id),
+
+
+Add functions:
+
+fn search(query: String, k: i64) -> Result<()> {
+    let store = open_store()?;
+    let hits = store.search_chunks_fts(&query, k)?;
+    for h in hits {
+        println!(
+            "chunk:{} doc:{} entity:{:?} score:{:.3}\n  {}\n",
+            h.chunk_id, h.document_id, h.entity_id, h.score, h.snippet
+        );
+    }
+    Ok(())
+}
+
+fn show_chunk(id: i64) -> Result<()> {
+    let store = open_store()?;
+    let chunk = store.get_chunk(id)?;
+    match chunk {
+        Some(c) => {
+            println!("chunk:{} doc:{} entity:{:?}\n\n{}", c.id, c.document_id, c.entity_id, c.content);
+        }
+        None => println!("chunk not found: {id}"),
+    }
+    Ok(())
+}
+
+Quick test commands
+
+After this commit:
+
+cargo run -p ddai_cli -- init-db
+cargo run -p ddai_cli -- search "advantage" --k 5
+cargo run -p ddai_cli -- show-chunk 1
+
+
+Also test against API-ingested content:
+
+cargo run -p ddai_cli -- search "Armor Class" --k 5
+cargo run -p ddai_cli -- search "Casting Time" --k 5
