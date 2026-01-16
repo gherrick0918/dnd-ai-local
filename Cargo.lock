@@ -203,6 +203,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ddai_ingest",
+ "ddai_llm",
  "ddai_store",
  "dotenvy",
 ]
@@ -231,6 +232,12 @@ dependencies = [
 [[package]]
 name = "ddai_llm"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "ddai_retrieve"
@@ -241,7 +248,9 @@ name = "ddai_store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "rusqlite",
+ "sha2",
 ]
 
 [[package]]

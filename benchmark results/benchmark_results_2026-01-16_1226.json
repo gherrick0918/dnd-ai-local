@@ -1,0 +1,8 @@
+﻿{
+    "Model":  "qwen2.5:0.5b",
+    "SuccessfulRuns":  3,
+    "AverageTime":  5.4381445,
+    "MinTime":  4.9055139,
+    "MaxTime":  6.1396801,
+    "TotalRuns":  3
+}

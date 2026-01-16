@@ -1,0 +1,34 @@
+﻿[
+    {
+        "Model":  "qwen2.5:0.5b",
+        "SuccessfulRuns":  50,
+        "AverageTime":  5.687701002,
+        "MinTime":  3.6042267999999997,
+        "MaxTime":  11.149540199999999,
+        "TotalRuns":  50
+    },
+    {
+        "Model":  "llama3.2:1b",
+        "SuccessfulRuns":  50,
+        "AverageTime":  9.155612184,
+        "MinTime":  6.4027597,
+        "MaxTime":  16.5438559,
+        "TotalRuns":  50
+    },
+    {
+        "Model":  "phi3.5:3.8b",
+        "SuccessfulRuns":  6,
+        "AverageTime":  26.357271099999995,
+        "MinTime":  22.561622999999997,
+        "MaxTime":  29.7304651,
+        "TotalRuns":  50
+    },
+    {
+        "Model":  "gemma2:2b",
+        "SuccessfulRuns":  50,
+        "AverageTime":  14.036423718000005,
+        "MinTime":  11.6655337,
+        "MaxTime":  22.822343099999998,
+        "TotalRuns":  50
+    }
+]

@@ -60,17 +60,37 @@ function Run-And-Capture {
 # Run each command and capture output
 Run-And-Capture "cargo fmt --all"
 Run-And-Capture "cargo clippy --all-targets --all-features" 
+Run-And-Capture "cargo check -p ddai_llm"
+Run-And-Capture "cargo check -p ddai_cli"
+Run-And-Capture "cargo build"
 Run-And-Capture "cargo test"
 Run-And-Capture "cargo run --bin ddai_cli"
 Run-And-Capture "cargo run -p ddai_cli -- init-db"
 Run-And-Capture "cargo run -p ddai_cli -- ingest .\data\raw\sample_rules.md --source 'Sample Rules Pack' --title 'Sample Rules Pack (Test Content)' --license 'Internal test content' --attribution 'Created by the developer for ingestion tests'"
 Run-And-Capture "cargo run -p ddai_cli -- list-docs"
-Run-And-Capture "cargo run -p ddai_cli -- ingest-dnd5eapi --base-url https://www.dnd5eapi.co --limit 25 --source 'dnd5eapi.co (SRD mirror)'"
+Run-And-Capture "cargo run -p ddai_cli -- ingest-dnd5eapi --base-url https://www.dnd5eapi.co --source 'dnd5eapi.co (SRD mirror)'"
 Run-And-Capture "cargo run -p ddai_cli -- list-docs"
+Run-And-Capture "cargo run -p ddai_cli -- list-entities --kind monsters --limit 10"
+Run-And-Capture "cargo run -p ddai_cli -- list-entities --kind spells --limit 10"
+
+# Test search functionality
 Run-And-Capture "cargo run -p ddai_cli -- search 'advantage' --k 5"
-Run-And-Capture "cargo run -p ddai_cli -- search 'Armor Class' --k 5"
-Run-And-Capture "cargo run -p ddai_cli -- search 'Casting Time' --k 5"
+Run-And-Capture "cargo run -p ddai_cli -- search 'goblin' --k 5"
+Run-And-Capture "cargo run -p ddai_cli -- search 'bronze dragon' --k 5"
+Run-And-Capture "cargo run -p ddai_cli -- search 'dragon armor class' --k 5"
+
+# Test chunk inspection
 Run-And-Capture "cargo run -p ddai_cli -- show-chunk 1"
+
+# Test AI-powered ask functionality - these work well
+Run-And-Capture "cargo run -p ddai_cli -- ask 'What does advantage do?' --k 6"
+Run-And-Capture "cargo run -p ddai_cli -- ask 'What is Armor Class for a goblin?' --k 8"
+Run-And-Capture "cargo run -p ddai_cli -- ask 'What is the AC of a Bronze Dragon?' --k 8"
+Run-And-Capture "cargo run -p ddai_cli -- ask 'What is the AC of an Adult Bronze Dragon?' --k 8"
+
+# Examples that show the importance of specific queries
+# Run-And-Capture "cargo run -p ddai_cli -- ask 'What is the Armor Class of a dragon?' --k 8"  # Too generic - finds spell data
+# Run-And-Capture "cargo run -p ddai_cli -- ask 'What are the stats for dragons?' --k 8"        # Too vague - no good matches
 
 # Add final prompt and end metadata
 "PS $((Get-Location).Path)>" | Out-File -FilePath $captureFile -Append -Encoding UTF8

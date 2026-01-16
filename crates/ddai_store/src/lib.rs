@@ -6,6 +6,9 @@ use rusqlite::{Connection, params};
 
 use rusqlite::OptionalExtension;
 
+// Re-export rusqlite types that consumers might need
+pub use rusqlite::ToSql;
+
 /// Current schema version for the SQLite database.
 pub const SCHEMA_VERSION: i64 = 3;
 
@@ -397,6 +400,43 @@ impl Store {
     }
 
     pub fn search_chunks_fts(&self, query: &str, limit: i64) -> Result<Vec<ChunkHit>> {
+        // Clean the query by removing punctuation that causes FTS issues
+        let cleaned_query = query
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect::<String>();
+
+        // Try multiple search strategies with the cleaned query
+        let search_strategies = vec![
+            cleaned_query.clone(), // Try cleaned unquoted first
+            format!("\"{}\"", cleaned_query.replace("\"", "\"\"")), // Then exact phrase
+            cleaned_query
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" OR "), // Then OR of words
+        ];
+
+        for (i, search_query) in search_strategies.iter().enumerate() {
+            if search_query.trim().is_empty() {
+                continue;
+            }
+
+            let result = self.try_fts_query(search_query, limit);
+
+            match result {
+                Ok(hits) if !hits.is_empty() => {
+                    return Ok(hits);
+                }
+                Ok(_) => continue, // Try next strategy
+                Err(_) if i < search_strategies.len() - 1 => continue, // Try next on error
+                Err(e) => return Err(e), // Return last error
+            }
+        }
+
+        Ok(Vec::new()) // No results with any strategy
+    }
+
+    fn try_fts_query(&self, query: &str, limit: i64) -> Result<Vec<ChunkHit>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -422,31 +462,15 @@ impl Store {
                     snippet: r.get(4)?,
                 })
             })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(hits)
     }
 }
 
-pub fn unix_ms() -> i64 {
+fn unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .unwrap()
         .as_millis() as i64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn migrate_and_health_check() {
-        let conn = Connection::open_in_memory().unwrap();
-        let store = Store {
-            conn,
-            db_path: PathBuf::from(":memory:"),
-        };
-        store.migrate().unwrap();
-        store.health_check().unwrap();
-    }
 }

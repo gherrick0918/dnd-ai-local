@@ -1,0 +1,203 @@
+Next commit: ddai ask powered by Ollama /api/generate
+
+Ollama exposes a local REST API (default http://localhost:11434), and the generate endpoint is POST /api/generate. Streaming is the default, but you can disable it with "stream": false.
+
+1) crates/ddai_llm/Cargo.toml
+[package]
+name = "ddai_llm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+2) crates/ddai_llm/src/lib.rs
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone)]
+pub struct OllamaClient {
+    pub host: String,  // e.g. http://127.0.0.1:11434
+    pub model: String, // e.g. llama3.1:8b
+}
+
+impl OllamaClient {
+    pub fn new(host: impl Into<String>, model: impl Into<String>) -> Self {
+        Self { host: host.into(), model: model.into() }
+    }
+
+    pub fn generate(&self, prompt: &str) -> Result<String> {
+        let url = format!("{}/api/generate", self.host.trim_end_matches('/'));
+        let client = reqwest::blocking::Client::new();
+
+        let req = GenerateRequest {
+            model: &self.model,
+            prompt,
+            stream: false,
+        };
+
+        let resp: GenerateResponse = client
+            .post(&url)
+            .json(&req)
+            .send()
+            .with_context(|| format!("POST {url}"))?
+            .error_for_status()
+            .with_context(|| format!("HTTP error from {url}"))?
+            .json()
+            .context("failed to parse ollama response json")?;
+
+        Ok(resp.response)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct GenerateRequest<'a> {
+    model: &'a str,
+    prompt: &'a str,
+    stream: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerateResponse {
+    response: String,
+}
+
+3) ddai_cli: add ask command
+crates/ddai_cli/Cargo.toml add deps
+ddai_llm = { path = "../ddai_llm" }
+
+crates/ddai_cli/src/main.rs add subcommand
+
+Add to your Command enum:
+
+/// Ask a question using local retrieval + Ollama.
+/// Uses FTS to fetch top-k chunks as SOURCES, then prompts Ollama to answer with citations.
+Ask {
+    question: String,
+
+    #[arg(long, default_value_t = 8)]
+    k: i64,
+
+    /// Prompts directory (defaults to ./prompts)
+    #[arg(long)]
+    prompts_dir: Option<String>,
+},
+
+
+Add match arm:
+
+Command::Ask { question, k, prompts_dir } => ask(question, k, prompts_dir),
+
+
+Add the function:
+
+fn ask(question: String, k: i64, prompts_dir: Option<String>) -> Result<()> {
+    let store = open_store()?;
+
+    // 1) Retrieve top-k chunks via FTS
+    let hits = store.search_chunks_fts(&question, k)?;
+    if hits.is_empty() {
+        println!("No search hits. Try a different query or ingest more sources.");
+        return Ok(());
+    }
+
+    // 2) Load prompts
+    let dir = prompts_dir
+        .or_else(|| std::env::var("DDAI_PROMPTS_DIR").ok())
+        .unwrap_or_else(|| "./prompts".to_string());
+
+    let system = std::fs::read_to_string(format!("{dir}/system.md"))
+        .with_context(|| format!("reading {dir}/system.md"))?;
+    let task = std::fs::read_to_string(format!("{dir}/rules_qa.md"))
+        .with_context(|| format!("reading {dir}/rules_qa.md"))?;
+
+    // 3) Build SOURCES block (full chunk text)
+    let mut allowed_ids: Vec<i64> = Vec::new();
+    let mut sources = String::new();
+
+    for h in hits {
+        if let Some(c) = store.get_chunk(h.chunk_id)? {
+            allowed_ids.push(c.id);
+            sources.push_str(&format!(
+                "[chunk:{} doc:{} entity:{:?}]\n{}\n\n",
+                c.id, c.document_id, c.entity_id, c.content
+            ));
+        }
+    }
+
+    let prompt = format!(
+        "{system}\n\n{task}\n\nSOURCES:\n{sources}\nUSER QUESTION:\n{question}\n"
+    );
+
+    // 4) Call Ollama
+    let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.1:8b".into());
+    let client = ddai_llm::OllamaClient::new(host, model);
+
+    let answer = client.generate(&prompt)?;
+
+    // 5) Basic citation sanity-check (warn if it cites unknown chunks)
+    let unknown = find_cited_chunk_ids(&answer)
+        .into_iter()
+        .filter(|id| !allowed_ids.contains(id))
+        .collect::<Vec<_>>();
+
+    println!("{answer}");
+
+    if !unknown.is_empty() {
+        eprintln!(
+            "\n[warn] Model cited chunk IDs not in provided sources: {:?}\n\
+             (Try increasing --k or improving chunking/search.)",
+            unknown
+        );
+    }
+
+    Ok(())
+}
+
+// Finds chunk ids referenced like "chunk:123" or "[chunk:123]".
+fn find_cited_chunk_ids(text: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+
+    while i + 6 < bytes.len() {
+        if bytes[i..].starts_with(b"chunk:") {
+            i += 6;
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i > start {
+                if let Ok(n) = std::str::from_utf8(&bytes[start..i]).ok().and_then(|s| s.parse::<i64>().ok()) {
+                    out.push(n);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}
+
+4) .env.example add prompts dir (optional but nice)
+DDAI_PROMPTS_DIR=./prompts
+
+How to run it
+
+Assuming Ollama is running and you’ve pulled a model:
+
+cargo run -p ddai_cli -- init-db
+cargo run -p ddai_cli -- ingest .\data\raw\sample_rules.md --source "Sample Rules Pack" --title "Sample Rules Pack (Test Content)"
+cargo run -p ddai_cli -- ask "What does advantage do?" --k 6
+
+
+If you’ve ingested API content:
+
+cargo run -p ddai_cli -- ask "What is Armor Class for a goblin?" --k 8
