@@ -73,6 +73,9 @@ Run-And-Capture "cargo run -p ddai_cli -- list-docs"
 Run-And-Capture "cargo run -p ddai_cli -- list-entities --kind monsters --limit 10"
 Run-And-Capture "cargo run -p ddai_cli -- list-entities --kind spells --limit 10"
 
+# Test model listing
+Run-And-Capture "cargo run -p ddai_cli -- models"
+
 # Test search functionality
 Run-And-Capture "cargo run -p ddai_cli -- search 'advantage' --k 5"
 Run-And-Capture "cargo run -p ddai_cli -- search 'goblin' --k 5"
@@ -82,11 +85,15 @@ Run-And-Capture "cargo run -p ddai_cli -- search 'dragon armor class' --k 5"
 # Test chunk inspection
 Run-And-Capture "cargo run -p ddai_cli -- show-chunk 1"
 
-# Test AI-powered ask functionality - these work well
+# Test AI-powered ask functionality with regular text output
 Run-And-Capture "cargo run -p ddai_cli -- ask 'What does advantage do?' --k 6"
 Run-And-Capture "cargo run -p ddai_cli -- ask 'What is Armor Class for a goblin?' --k 8"
 Run-And-Capture "cargo run -p ddai_cli -- ask 'What is the AC of a Bronze Dragon?' --k 8"
 Run-And-Capture "cargo run -p ddai_cli -- ask 'What is the AC of an Adult Bronze Dragon?' --k 8"
+
+# Test new JSON output functionality
+Run-And-Capture "cargo run -p ddai_cli -- ask 'What does advantage do?' --k 6 --json"
+Run-And-Capture "cargo run -p ddai_cli -- ask 'What is Armor Class (AC)?' --k 8 --json"
 
 # Examples that show the importance of specific queries
 # Run-And-Capture "cargo run -p ddai_cli -- ask 'What is the Armor Class of a dragon?' --k 8"  # Too generic - finds spell data

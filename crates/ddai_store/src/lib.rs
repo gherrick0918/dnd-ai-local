@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
-
 use rusqlite::OptionalExtension;
+use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 
 // Re-export rusqlite types that consumers might need
 pub use rusqlite::ToSql;
@@ -219,7 +219,7 @@ impl Store {
         // We set rowid = chunks.id so we can round-trip chunk ids easily.
         self.conn.execute_batch(
             r#"
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
               content,
               chunk_id UNINDEXED,
               document_id UNINDEXED,
@@ -227,26 +227,26 @@ impl Store {
               tokenize = 'unicode61'
             );
 
-            INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+            INSERT OR IGNORE INTO fts_chunks(rowid, content, chunk_id, document_id, entity_id)
             SELECT id, content, id, document_id, entity_id
             FROM chunks
-            WHERE id NOT IN (SELECT rowid FROM chunks_fts);
+            WHERE id NOT IN (SELECT rowid FROM fts_chunks);
 
             CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-              INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+              INSERT INTO fts_chunks(rowid, content, chunk_id, document_id, entity_id)
               VALUES (new.id, new.content, new.id, new.document_id, new.entity_id);
             END;
 
             CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-              INSERT INTO chunks_fts(chunks_fts, rowid, content, chunk_id, document_id, entity_id)
+              INSERT INTO fts_chunks(fts_chunks, rowid, content, chunk_id, document_id, entity_id)
               VALUES ('delete', old.id, old.content, old.id, old.document_id, old.entity_id);
             END;
 
             CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-              INSERT INTO chunks_fts(chunks_fts, rowid, content, chunk_id, document_id, entity_id)
+              INSERT INTO fts_chunks(fts_chunks, rowid, content, chunk_id, document_id, entity_id)
               VALUES ('delete', old.id, old.content, old.id, old.document_id, old.entity_id);
 
-              INSERT INTO chunks_fts(rowid, content, chunk_id, document_id, entity_id)
+              INSERT INTO fts_chunks(rowid, content, chunk_id, document_id, entity_id)
               VALUES (new.id, new.content, new.id, new.document_id, new.entity_id);
             END;
             "#,
@@ -400,72 +400,214 @@ impl Store {
     }
 
     pub fn search_chunks_fts(&self, query: &str, limit: i64) -> Result<Vec<ChunkHit>> {
-        // Clean the query by removing punctuation that causes FTS issues
-        let cleaned_query = query
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect::<String>();
+        // First, let's check if the FTS table exists and has data
+        let fts_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='fts_chunks'",
+            [],
+            |r| r.get(0),
+        )?;
 
-        // Try multiple search strategies with the cleaned query
-        let search_strategies = vec![
-            cleaned_query.clone(), // Try cleaned unquoted first
-            format!("\"{}\"", cleaned_query.replace("\"", "\"\"")), // Then exact phrase
-            cleaned_query
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" OR "), // Then OR of words
-        ];
-
-        for (i, search_query) in search_strategies.iter().enumerate() {
-            if search_query.trim().is_empty() {
-                continue;
-            }
-
-            let result = self.try_fts_query(search_query, limit);
-
-            match result {
-                Ok(hits) if !hits.is_empty() => {
-                    return Ok(hits);
-                }
-                Ok(_) => continue, // Try next strategy
-                Err(_) if i < search_strategies.len() - 1 => continue, // Try next on error
-                Err(e) => return Err(e), // Return last error
-            }
+        if !fts_exists {
+            println!(
+                "Warning: FTS table 'fts_chunks' does not exist. No search results available."
+            );
+            return Ok(Vec::new());
         }
 
-        Ok(Vec::new()) // No results with any strategy
-    }
+        // Extract key terms from the query for better matching
+        let key_terms: Vec<String> = query
+            .split_whitespace()
+            .filter_map(|word| {
+                // Clean each word of punctuation first
+                let cleaned_word: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
 
-    fn try_fts_query(&self, query: &str, limit: i64) -> Result<Vec<ChunkHit>> {
+                if cleaned_word.is_empty() {
+                    return None;
+                }
+
+                let word_lower = cleaned_word.to_lowercase();
+                // Keep important words, skip common question words
+                if matches!(
+                    word_lower.as_str(),
+                    "what"
+                        | "is"
+                        | "the"
+                        | "a"
+                        | "an"
+                        | "of"
+                        | "for"
+                        | "does"
+                        | "do"
+                        | "how"
+                        | "why"
+                        | "when"
+                        | "where"
+                ) {
+                    None
+                } else {
+                    Some(cleaned_word)
+                }
+            })
+            .collect();
+
+        // If we have key terms, use them; otherwise fall back to cleaned query
+        let search_query = if !key_terms.is_empty() {
+            key_terms.join(" ")
+        } else {
+            query
+                .chars()
+                .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+
+        if search_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        println!("FTS search query: '{}'", search_query); // Debug output
+
+        // Use a simpler FTS query that's more compatible
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
-              chunk_id,
-              document_id,
-              entity_id,
-              bm25(chunks_fts) AS score,
-              snippet(chunks_fts, 0, '[', ']', '...', 20) AS snip
-            FROM chunks_fts
-            WHERE chunks_fts MATCH ?1
-            ORDER BY score
+              chunks.id, chunks.document_id, chunks.entity_id,
+              1.0 AS score,
+              substr(chunks.content, 1, 200) AS snippet
+            FROM fts_chunks
+            JOIN chunks ON chunks.id = fts_chunks.rowid
+            WHERE fts_chunks MATCH ?1
+            ORDER BY chunks.id
             LIMIT ?2
             "#,
         )?;
 
         let hits = stmt
-            .query_map(rusqlite::params![query, limit], |r| {
+            .query_map(rusqlite::params![search_query, limit], |r| {
                 Ok(ChunkHit {
                     chunk_id: r.get(0)?,
                     document_id: r.get(1)?,
                     entity_id: r.get(2)?,
                     score: r.get(3)?,
-                    snippet: r.get(4)?,
+                    snippet: r.get::<_, String>(4)?.replace('\n', " "),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(hits)
     }
+
+    // Add convenience methods that the CLI expects
+    pub fn ingest_document(
+        &self,
+        source: &str,
+        title: &str,
+        license: Option<&str>,
+        attribution: Option<&str>,
+    ) -> Result<i64> {
+        self.insert_document(source, Some(title), license, attribution)
+    }
+
+    pub fn ingest_chunk(
+        &self,
+        document_id: i64,
+        entity_id: Option<i64>,
+        content: &str,
+    ) -> Result<i64> {
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let sha = hex::encode(hasher.finalize());
+
+        let token_count = Some((content.len() / 4).max(1) as i64);
+
+        // Get the next chunk index for this document
+        let chunk_index: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM chunks WHERE document_id = ?1",
+            rusqlite::params![document_id],
+            |r| r.get(0),
+        )?;
+
+        self.insert_chunk(
+            document_id,
+            chunk_index,
+            content,
+            token_count,
+            &sha,
+            entity_id,
+        )
+    }
+
+    pub fn list_recent_documents(&self, limit: i64) -> Result<Vec<DocumentRow>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, source, title, license, attribution, created_at
+            FROM documents
+            ORDER BY created_at DESC
+            LIMIT ?1
+            "#,
+        )?;
+
+        let docs = stmt
+            .query_map(rusqlite::params![limit], |r| {
+                Ok(DocumentRow {
+                    id: r.get(0)?,
+                    source: r.get(1)?,
+                    title: r.get(2)?,
+                    license: r.get(3)?,
+                    attribution: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(docs)
+    }
+
+    pub fn list_entities(&self, kind: &str, limit: i64) -> Result<Vec<EntityRow>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, kind, api_index, name, source, original_ref, json, created_at
+            FROM entities
+            WHERE kind = ?1
+            ORDER BY name
+            LIMIT ?2
+            "#,
+        )?;
+
+        let entities = stmt
+            .query_map(rusqlite::params![kind, limit], |r| {
+                Ok(EntityRow {
+                    id: r.get(0)?,
+                    kind: r.get(1)?,
+                    api_index: r.get(2)?,
+                    name: r.get(3)?,
+                    source: r.get(4)?,
+                    original_ref: r.get(5)?,
+                    json: r.get(6)?,
+                    created_at: r.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(entities)
+    }
+
+    pub fn schema_version(&self) -> i64 {
+        SCHEMA_VERSION
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EntityRow {
+    pub id: i64,
+    pub kind: String,
+    pub api_index: String,
+    pub name: String,
+    pub source: String,
+    pub original_ref: Option<String>,
+    pub json: String,
+    pub created_at: i64,
 }
 
 fn unix_ms() -> i64 {

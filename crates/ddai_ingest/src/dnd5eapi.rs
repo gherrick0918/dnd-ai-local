@@ -47,10 +47,10 @@ fn ingest_kind(store: &Store, opts: &Dnd5eApiOptions<'_>, kind: &str) -> Result<
 
     let mut count = 0usize;
     for (i, r) in list.results.iter().enumerate() {
-        if let Some(limit) = opts.limit
-            && i >= limit
-        {
-            break;
+        if let Some(limit) = opts.limit {
+            if i >= limit {
+                break;
+            }
         }
 
         let item_url = format!(

@@ -1,0 +1,76 @@
+Next commit: ddai models + ddai ask --json (schema-enforced citations)
+1) Add Ollama “list models” to ddai_llm
+
+Add a method that calls GET {host}/api/tags and returns a vec of model names (and maybe size). This gives you a friendly error when OLLAMA_MODEL isn’t installed.
+
+2) Upgrade generate() to support system, format, and options
+
+Ollama’s generate endpoint supports:
+
+system (separate from prompt)
+
+format (json or schema)
+
+options (runtime generation controls)
+
+So your request struct becomes something like:
+
+#[derive(Serialize)]
+struct GenerateRequest<'a> {
+  model: &'a str,
+  prompt: &'a str,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  system: Option<&'a str>,
+  stream: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  format: Option<serde_json::Value>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  options: Option<serde_json::Value>,
+}
+
+
+Then in ask, pass:
+
+system = contents of prompts/system.md
+
+prompt = rules_qa + SOURCES + QUESTION
+
+format = JSON schema (below)
+
+options = {"temperature": 0} (and later expose flags)
+
+3) JSON Schema for the response
+
+Use a schema that forces citations to be chunk IDs:
+
+{
+  "type": "object",
+  "properties": {
+    "answer": { "type": "string" },
+    "citations": { "type": "array", "items": { "type": "integer" } },
+    "followup_question": { "type": "string" }
+  },
+  "required": ["answer", "citations"],
+  "additionalProperties": false
+}
+
+
+Ollama will try to match that schema when you send it in format.
+
+4) CLI additions
+
+ddai models → calls /api/tags and prints installed models
+
+ddai ask "...question..." --k 8 --json → prints the JSON object (or prints answer + citations extracted from JSON)
+
+5) Keep your existing “unknown citation” guard
+
+Even with schema, still validate: citations must be a subset of the chunk IDs you provided in SOURCES. If not, warn and/or drop unknown IDs.
+
+Quick test after the commit
+cargo run -p ddai_cli -- models
+cargo run -p ddai_cli -- ask "What does advantage do?" --k 6 --json
+cargo run -p ddai_cli -- ask "What is Armor Class (AC)?" --k 8 --json
+
+
+If you paste the ask output from your latest terminal capture (just one question/answer), I can tune the prompt so the model reliably cites [chunk:<id>] and keeps citations minimal/accurate.

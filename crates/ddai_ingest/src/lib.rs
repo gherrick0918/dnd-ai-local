@@ -14,6 +14,34 @@ pub struct IngestOptions<'a> {
     pub target_chunk_chars: usize, // simple heuristic for now
 }
 
+// Re-export the main functions that CLI expects
+pub use dnd5eapi::ingest_spells_and_monsters;
+
+// Add the async wrapper function that main.rs expects
+pub async fn ingest_dnd5eapi(
+    _store: &Store,
+    base_url: &str,
+    limit: Option<usize>,
+    source: &str,
+) -> Result<()> {
+    let base_url = base_url.to_string();
+    let source = source.to_string();
+
+    // Use tokio::task::spawn_blocking to run the blocking code
+    tokio::task::spawn_blocking(move || {
+        let store = ddai_store::Store::open("./data/db/ddai.sqlite")?;
+        let opts = dnd5eapi::Dnd5eApiOptions {
+            base_url: &base_url,
+            source: &source,
+            limit,
+        };
+        dnd5eapi::ingest_spells_and_monsters(&store, opts)
+    })
+    .await??;
+
+    Ok(())
+}
+
 pub fn ingest_file(store: &Store, path: impl AsRef<Path>, opts: IngestOptions<'_>) -> Result<i64> {
     let text = std::fs::read_to_string(&path)?;
     let doc_id = store.insert_document(opts.source, opts.title, opts.license, opts.attribution)?;
@@ -29,7 +57,7 @@ pub fn ingest_file(store: &Store, path: impl AsRef<Path>, opts: IngestOptions<'_
     Ok(doc_id)
 }
 
-fn chunk_text(text: &str, target_chars: usize) -> Vec<String> {
+pub fn chunk_text(text: &str, target_chars: usize) -> Vec<String> {
     // Paragraph-based: split on blank lines, then pack paragraphs up to ~target_chars.
     let paras: Vec<&str> = text
         .split("\n\n")

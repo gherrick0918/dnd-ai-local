@@ -45,20 +45,34 @@ enum Command {
     },
 
     /// List recent documents.
-    ListDocs,
+    ListDocs {
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
 
+    /// List entities (spells, monsters, etc.).
+    ListEntities {
+        #[arg(long)]
+        kind: String,
+
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
+
+    /// Search chunks using full-text search.
     Search {
         query: String,
-        #[arg(long, default_value_t = 8)]
+
+        #[arg(long, default_value_t = 10)]
         k: i64,
     },
 
+    /// Show a specific chunk by ID.
     ShowChunk {
         id: i64,
     },
 
     /// Ask a question using local retrieval + Ollama.
-    /// Uses FTS to fetch top-k chunks as SOURCES, then prompts Ollama to answer with citations.
     Ask {
         question: String,
 
@@ -68,23 +82,20 @@ enum Command {
         /// Prompts directory (defaults to ./prompts)
         #[arg(long)]
         prompts_dir: Option<String>,
-    },
 
-    /// List entities (spells, monsters) in the database
-    ListEntities {
+        /// Output structured JSON with citations
         #[arg(long)]
-        kind: Option<String>, // Filter by kind: "spells" or "monsters"
-
-        #[arg(long, default_value_t = 20)]
-        limit: i64,
+        json: bool,
     },
+
+    /// List available Ollama models.
+    Models,
 }
 
-fn main() -> Result<()> {
-    // Load .env file if it exists
-    let _ = dotenvy::dotenv();
-
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
+
     match cli.command {
         Command::InitDb => init_db(),
         Command::Ingest {
@@ -99,37 +110,33 @@ fn main() -> Result<()> {
             base_url,
             limit,
             source,
-        } => ingest_dnd5eapi(base_url, limit, source),
-        Command::ListDocs => list_docs(),
+        } => ingest_dnd5eapi(base_url, limit, source).await,
+        Command::ListDocs { limit } => list_docs(limit),
+        Command::ListEntities { kind, limit } => list_entities(kind, limit),
         Command::Search { query, k } => search(query, k),
         Command::ShowChunk { id } => show_chunk(id),
         Command::Ask {
             question,
             k,
             prompts_dir,
-        } => ask(question, k, prompts_dir),
-        Command::ListEntities { kind, limit } => list_entities(kind, limit),
+            json,
+        } => ask(question, k, prompts_dir, json).await,
+        Command::Models => models().await,
     }
 }
 
-fn db_path() -> String {
-    std::env::var("DDAI_DB_PATH").unwrap_or_else(|_| "./data/db/ddai.sqlite".to_string())
-}
-
 fn open_store() -> Result<ddai_store::Store> {
-    let p = db_path();
-    let store = ddai_store::Store::open(&p).with_context(|| format!("opening db at {p}"))?;
-    store.migrate().context("running migrations")?;
+    let store = ddai_store::Store::open("./data/db/ddai.sqlite")?;
+    store.migrate()?; // Ensure schema is up to date
     Ok(store)
 }
 
 fn init_db() -> Result<()> {
     let store = open_store()?;
-    store.health_check().context("db health check")?;
+    store.health_check()?; // Verify database is working
     println!(
-        "DB ready: {} (schema v{})",
-        store.path().display(),
-        ddai_store::SCHEMA_VERSION
+        "DB ready: ./data/db/ddai.sqlite (schema v{})",
+        store.schema_version()
     );
     Ok(())
 }
@@ -143,46 +150,53 @@ fn ingest(
     chunk_chars: usize,
 ) -> Result<()> {
     let store = open_store()?;
-    let doc_id = ddai_ingest::ingest_file(
-        &store,
-        &path,
-        ddai_ingest::IngestOptions {
-            source: &source,
-            title: title.as_deref(),
-            license: license.as_deref(),
-            attribution: attribution.as_deref(),
-            target_chunk_chars: chunk_chars,
-        },
-    )?;
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("Failed to read file: {}", path))?;
 
-    println!("Ingested document id={doc_id} from {path}");
+    let title = title.unwrap_or_else(|| {
+        std::path::Path::new(&path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled")
+            .to_string()
+    });
+
+    let doc_id =
+        store.ingest_document(&source, &title, license.as_deref(), attribution.as_deref())?;
+
+    let chunks = ddai_ingest::chunk_text(&content, chunk_chars);
+    for chunk in chunks {
+        store.ingest_chunk(doc_id, None, &chunk)?;
+    }
+
+    println!("Ingested document id={} from {}", doc_id, path);
     Ok(())
 }
 
-fn ingest_dnd5eapi(base_url: String, limit: Option<usize>, source: String) -> Result<()> {
+async fn ingest_dnd5eapi(base_url: String, limit: Option<usize>, source: String) -> Result<()> {
     let store = open_store()?;
-    ddai_ingest::dnd5eapi::ingest_spells_and_monsters(
-        &store,
-        ddai_ingest::dnd5eapi::Dnd5eApiOptions {
-            base_url: &base_url,
-            source: &source,
-            limit,
-        },
-    )?;
-    println!("DnD 5e API ingest completed successfully!");
-    Ok(())
+    ddai_ingest::ingest_dnd5eapi(&store, &base_url, limit, &source).await
 }
 
-fn list_docs() -> Result<()> {
+fn list_docs(limit: i64) -> Result<()> {
     let store = open_store()?;
-    let docs = store.list_documents(10)?;
-    for d in docs {
+    let docs = store.list_recent_documents(limit)?;
+    for doc in docs {
         println!(
             "id={} source={} title={}",
-            d.id,
-            d.source,
-            d.title.unwrap_or_else(|| "-".into())
+            doc.id,
+            doc.source,
+            doc.title.unwrap_or_else(|| "Untitled".to_string())
         );
+    }
+    Ok(())
+}
+
+fn list_entities(kind: String, limit: i64) -> Result<()> {
+    let store = open_store()?;
+    let entities = store.list_entities(&kind, limit)?;
+    for entity in entities {
+        println!("id={} name={}", entity.id, entity.name);
     }
     Ok(())
 }
@@ -190,19 +204,20 @@ fn list_docs() -> Result<()> {
 fn search(query: String, k: i64) -> Result<()> {
     let store = open_store()?;
     let hits = store.search_chunks_fts(&query, k)?;
-    for h in hits {
+    for hit in hits {
         println!(
-            "chunk:{} doc:{} entity:{:?} score:{:.3}\n  {}\n",
-            h.chunk_id, h.document_id, h.entity_id, h.score, h.snippet
+            "chunk:{} doc:{} entity:{:?} score:{:.3}",
+            hit.chunk_id, hit.document_id, hit.entity_id, hit.score
         );
+        println!("  {}", hit.snippet);
+        println!();
     }
     Ok(())
 }
 
 fn show_chunk(id: i64) -> Result<()> {
     let store = open_store()?;
-    let chunk = store.get_chunk(id)?;
-    match chunk {
+    match store.get_chunk(id)? {
         Some(c) => {
             println!(
                 "chunk:{} doc:{} entity:{:?}\n\n{}",
@@ -214,26 +229,26 @@ fn show_chunk(id: i64) -> Result<()> {
     Ok(())
 }
 
-fn ask(question: String, k: i64, prompts_dir: Option<String>) -> Result<()> {
-    println!("Starting ask with question: '{}'", question);
+async fn ask(question: String, k: i64, prompts_dir: Option<String>, json: bool) -> Result<()> {
     let store = open_store()?;
 
     // 1) Retrieve top-k chunks via FTS
+    println!("Starting ask with question: '{}'", question);
     let hits = store.search_chunks_fts(&question, k)?;
-    println!("Found {} search hits", hits.len());
-
     if hits.is_empty() {
         println!("No search hits. Try a different query or ingest more sources.");
         return Ok(());
     }
+    println!("Found {} search hits", hits.len());
 
-    // Print search results
-    println!("Search results:");
-    for h in &hits {
-        println!(
-            "  chunk:{} score:{:.3} snippet: {}",
-            h.chunk_id, h.score, h.snippet
-        );
+    if !json {
+        println!("Search results:");
+        for hit in &hits {
+            println!(
+                "  chunk:{} score:{:.3} snippet: {}",
+                hit.chunk_id, hit.score, hit.snippet
+            );
+        }
     }
 
     // 2) Load prompts
@@ -242,11 +257,10 @@ fn ask(question: String, k: i64, prompts_dir: Option<String>) -> Result<()> {
         .unwrap_or_else(|| "./prompts".to_string());
 
     println!("Loading prompts from directory: {}", dir);
-
-    let system = std::fs::read_to_string(format!("{dir}/system.md"))
-        .with_context(|| format!("reading {dir}/system.md"))?;
-    let task = std::fs::read_to_string(format!("{dir}/rules_qa.md"))
-        .with_context(|| format!("reading {dir}/rules_qa.md"))?;
+    let system = std::fs::read_to_string(format!("{}/system.md", dir))
+        .with_context(|| format!("reading {}/system.md", dir))?;
+    let task = std::fs::read_to_string(format!("{}/rules_qa.md", dir))
+        .with_context(|| format!("reading {}/rules_qa.md", dir))?;
 
     println!(
         "Loaded system prompt ({} chars) and task prompt ({} chars)",
@@ -258,7 +272,7 @@ fn ask(question: String, k: i64, prompts_dir: Option<String>) -> Result<()> {
     let mut allowed_ids: Vec<i64> = Vec::new();
     let mut sources = String::new();
 
-    for h in hits {
+    for h in &hits {
         if let Some(c) = store.get_chunk(h.chunk_id)? {
             allowed_ids.push(c.id);
             sources.push_str(&format!(
@@ -270,63 +284,105 @@ fn ask(question: String, k: i64, prompts_dir: Option<String>) -> Result<()> {
 
     println!(
         "Built sources block with {} chunks ({} chars)",
-        allowed_ids.len(),
+        hits.len(),
         sources.len()
     );
 
-    let prompt = format!("{system}\n\n{task}\n\nSOURCES:\n{sources}\nUSER QUESTION:\n{question}\n");
+    let prompt = format!(
+        "{}\n\nSOURCES:\n{}\nUSER QUESTION:\n{}\n",
+        task, sources, question
+    );
 
     println!("Full prompt length: {} chars", prompt.len());
 
     // 4) Call Ollama
     let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
-    let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.1:8b".into());
-
+    let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "gemma2:2b".into());
     println!("Connecting to Ollama at {} using model {}", host, model);
 
     let client = ddai_llm::OllamaClient::new(host, model);
 
-    match client.generate(&prompt) {
-        Ok(answer) => {
-            println!("Generated answer ({} chars):", answer.len());
-
-            // 5) Basic citation sanity-check (warn if it cites unknown chunks)
-            let unknown = find_cited_chunk_ids(&answer)
-                .into_iter()
-                .filter(|id| !allowed_ids.contains(id))
-                .collect::<Vec<_>>();
-
-            println!("{answer}");
-
-            if !unknown.is_empty() {
-                eprintln!(
-                    "\n[warn] Model cited chunk IDs not in provided sources: {:?}\n\
-                     (Try increasing --k or improving chunking/search.)",
-                    unknown
-                );
+    if json {
+        // Use structured JSON response with citations
+        match client
+            .generate_with_citations(&prompt, Some(&system), &allowed_ids)
+            .await
+        {
+            Ok(citation_answer) => {
+                println!("{}", serde_json::to_string_pretty(&citation_answer)?);
+            }
+            Err(e) => {
+                println!("Error generating response: {}", e);
+                return Err(e);
             }
         }
-        Err(e) => {
-            eprintln!("Error calling Ollama: {}", e);
-            eprintln!("Make sure Ollama is running and the model is available.");
-            eprintln!("Try: ollama serve");
-            eprintln!("And: ollama pull llama3.1:8b");
-            return Err(e);
+    } else {
+        // Use regular text response
+        match client
+            .generate_with_options(&prompt, Some(&system), None, None)
+            .await
+        {
+            Ok(response) => {
+                println!("Generated answer ({} chars):", response.len());
+                println!("{}", response);
+
+                // Extract cited chunk IDs from the response
+                let cited_ids = extract_chunk_ids(&response);
+                if !cited_ids.is_empty() {
+                    let valid_citations: Vec<i64> = cited_ids
+                        .into_iter()
+                        .filter(|id| allowed_ids.contains(id))
+                        .collect();
+
+                    if !valid_citations.is_empty() {
+                        println!("\nCited chunks: {:?}", valid_citations);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Error generating response: {}", e);
+                return Err(e);
+            }
         }
     }
 
     Ok(())
 }
 
-// Finds chunk ids referenced like "chunk:123" or "[chunk:123]".
-fn find_cited_chunk_ids(text: &str) -> Vec<i64> {
-    let mut out = Vec::new();
+async fn models() -> Result<()> {
+    let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let client = ddai_llm::OllamaClient::new(host.clone(), "dummy".to_string());
+
+    match client.list_models().await {
+        Ok(models) => {
+            if models.is_empty() {
+                println!("No models found. Run 'ollama pull <model>' to install a model.");
+            } else {
+                println!("Available Ollama models:");
+                for (name, size) in models {
+                    let size_gb = size as f64 / (1024.0 * 1024.0 * 1024.0);
+                    println!("  {} ({:.1} GB)", name, size_gb);
+                }
+            }
+        }
+        Err(e) => {
+            println!("Failed to connect to Ollama: {}", e);
+            println!("Make sure Ollama is running and accessible at {}", host);
+        }
+    }
+
+    Ok(())
+}
+
+// Helper function to extract chunk IDs from text response (for backwards compatibility)
+fn extract_chunk_ids(text: &str) -> Vec<i64> {
     let bytes = text.as_bytes();
+    let mut out = Vec::new();
     let mut i = 0;
 
-    while i + 6 < bytes.len() {
-        if bytes[i..].starts_with(b"chunk:") {
-            i += 6;
+    while i < bytes.len() {
+        if i + 5 < bytes.len() && &bytes[i..i + 6] == b"chunk:" {
+            i += 6; // skip "chunk:"
             let start = i;
             while i < bytes.len() && bytes[i].is_ascii_digit() {
                 i += 1;
@@ -347,43 +403,4 @@ fn find_cited_chunk_ids(text: &str) -> Vec<i64> {
     out.sort();
     out.dedup();
     out
-}
-
-fn list_entities(kind_filter: Option<String>, limit: i64) -> Result<()> {
-    let store = open_store()?;
-
-    let mut query = "SELECT id, kind, api_index, name, source FROM entities".to_string();
-    let mut params: Vec<&dyn ddai_store::ToSql> = Vec::new();
-
-    if let Some(kind) = &kind_filter {
-        query.push_str(" WHERE kind = ?");
-        params.push(kind as &dyn ddai_store::ToSql);
-    }
-
-    query.push_str(" ORDER BY kind, name LIMIT ?");
-    params.push(&limit as &dyn ddai_store::ToSql);
-
-    let conn = store.conn();
-    let mut stmt = conn.prepare(&query)?;
-
-    let entities = stmt.query_map(&params[..], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,    // id
-            row.get::<_, String>(1)?, // kind
-            row.get::<_, String>(2)?, // api_index
-            row.get::<_, String>(3)?, // name
-            row.get::<_, String>(4)?, // source
-        ))
-    })?;
-
-    println!("Entities in database:");
-    for entity in entities {
-        let (id, kind, api_index, name, source) = entity?;
-        println!(
-            "  {} | {} | {} | {} | {}",
-            id, kind, api_index, name, source
-        );
-    }
-
-    Ok(())
 }
