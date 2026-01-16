@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
+use rusqlite::OptionalExtension;
+
 /// Current schema version for the SQLite database.
 pub const SCHEMA_VERSION: i64 = 1;
 
@@ -11,6 +13,16 @@ pub const SCHEMA_VERSION: i64 = 1;
 pub struct Store {
     conn: Connection,
     db_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentRow {
+    pub id: i64,
+    pub source: String,
+    pub title: Option<String>,
+    pub license: Option<String>,
+    pub attribution: Option<String>,
+    pub created_at: i64,
 }
 
 impl Store {
@@ -137,6 +149,95 @@ impl Store {
         // Touch time helper for sanity.
         let _ = unix_ms();
         Ok(())
+    }
+
+    pub fn insert_document(
+        &self,
+        source: &str,
+        title: Option<&str>,
+        license: Option<&str>,
+        attribution: Option<&str>,
+    ) -> Result<i64> {
+        let now = unix_ms();
+        self.conn.execute(
+            r#"
+            INSERT INTO documents(source, title, license, attribution, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            rusqlite::params![source, title, license, attribution, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn insert_chunk(
+        &self,
+        document_id: i64,
+        chunk_index: i64,
+        content: &str,
+        token_count: Option<i64>,
+        sha256: &str,
+    ) -> Result<i64> {
+        let now = unix_ms();
+        self.conn.execute(
+            r#"
+            INSERT INTO chunks(document_id, chunk_index, content, token_count, sha256, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            rusqlite::params![document_id, chunk_index, content, token_count, sha256, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_document(&self, id: i64) -> Result<Option<DocumentRow>> {
+        let row = self
+            .conn
+            .query_row(
+                r#"
+            SELECT id, source, title, license, attribution, created_at
+            FROM documents
+            WHERE id = ?1
+            "#,
+                rusqlite::params![id],
+                |r| {
+                    Ok(DocumentRow {
+                        id: r.get(0)?,
+                        source: r.get(1)?,
+                        title: r.get(2)?,
+                        license: r.get(3)?,
+                        attribution: r.get(4)?,
+                        created_at: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(row)
+    }
+
+    pub fn list_documents(&self, limit: i64) -> Result<Vec<DocumentRow>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, source, title, license, attribution, created_at
+            FROM documents
+            ORDER BY id DESC
+            LIMIT ?1
+            "#,
+        )?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![limit], |r| {
+                Ok(DocumentRow {
+                    id: r.get(0)?,
+                    source: r.get(1)?,
+                    title: r.get(2)?,
+                    license: r.get(3)?,
+                    attribution: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rows)
     }
 }
 
