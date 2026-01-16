@@ -4,6 +4,8 @@ use std::path::Path;
 
 use ddai_store::Store;
 
+pub mod dnd5eapi;
+
 pub struct IngestOptions<'a> {
     pub source: &'a str,
     pub title: Option<&'a str>,
@@ -21,7 +23,7 @@ pub fn ingest_file(store: &Store, path: impl AsRef<Path>, opts: IngestOptions<'_
     for (i, chunk) in chunks.into_iter().enumerate() {
         let sha = sha256_hex(&chunk);
         let token_est = estimate_tokens(&chunk);
-        store.insert_chunk(doc_id, i as i64, &chunk, Some(token_est), &sha)?;
+        store.insert_chunk(doc_id, i as i64, &chunk, Some(token_est), &sha, None)?;
     }
 
     Ok(doc_id)
@@ -61,7 +63,6 @@ fn sha256_hex(s: &str) -> String {
 }
 
 fn estimate_tokens(s: &str) -> i64 {
-    // crude but stable: ~4 chars per token average
     let chars = s.chars().count() as i64;
     (chars / 4).max(1)
 }

@@ -32,6 +32,18 @@ enum Command {
         chunk_chars: usize,
     },
 
+    /// Ingest D&D 5e API data (spells and monsters).
+    IngestDnd5eapi {
+        #[arg(long, default_value = "https://www.dnd5eapi.co")]
+        base_url: String,
+
+        #[arg(long)]
+        limit: Option<usize>,
+
+        #[arg(long, default_value = "dnd5eapi.co (SRD mirror)")]
+        source: String,
+    },
+
     /// List recent documents.
     ListDocs {
         #[arg(long, default_value_t = 10)]
@@ -53,6 +65,11 @@ fn main() -> Result<()> {
             attribution,
             chunk_chars,
         } => ingest(path, source, title, license, attribution, chunk_chars),
+        Command::IngestDnd5eapi {
+            base_url,
+            limit,
+            source,
+        } => ingest_dnd5eapi(base_url, limit, source),
         Command::ListDocs { limit } => list_docs(limit),
     }
 }
@@ -101,6 +118,20 @@ fn ingest(
     )?;
 
     println!("Ingested document id={doc_id} from {path}");
+    Ok(())
+}
+
+fn ingest_dnd5eapi(base_url: String, limit: Option<usize>, source: String) -> Result<()> {
+    let store = open_store()?;
+    ddai_ingest::dnd5eapi::ingest_spells_and_monsters(
+        &store,
+        ddai_ingest::dnd5eapi::Dnd5eApiOptions {
+            base_url: &base_url,
+            source: &source,
+            limit,
+        },
+    )?;
+    println!("DnD 5e API ingest completed successfully!");
     Ok(())
 }
 
