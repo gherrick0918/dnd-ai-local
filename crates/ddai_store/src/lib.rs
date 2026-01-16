@@ -404,7 +404,7 @@ impl Store {
               document_id,
               entity_id,
               bm25(chunks_fts) AS score,
-              snippet(chunks_fts, 0, '[', ']', '…', 20) AS snip
+              snippet(chunks_fts, 0, '[', ']', '...', 20) AS snip
             FROM chunks_fts
             WHERE chunks_fts MATCH ?1
             ORDER BY score

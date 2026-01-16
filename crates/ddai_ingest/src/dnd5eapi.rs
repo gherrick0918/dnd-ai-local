@@ -166,7 +166,7 @@ fn render_monster(v: &Value) -> String {
     let ac = v
         .get("armor_class")
         .and_then(|x| x.as_array())
-        .and_then(|a| a.first())
+        .and_then(|a| a.get(0))
         .and_then(|x| x.get("value").or(Some(x)))
         .and_then(|x| x.as_i64())
         .map(|n| n.to_string())
@@ -205,7 +205,7 @@ fn render_monster(v: &Value) -> String {
         .unwrap_or_default();
 
     format!(
-        "# Monster: {name}\n\n- Size: {size}\n- Type: {mtype}\n- Alignment: {alignment}\n- AC: {ac}\n- HP: {hp}\n- CR: {cr}\n\n## Ability Scores\nSTR {str_} | DEX {dex} | CON {con} | INT {int_} | WIS {wis} | CHA {cha}\n\n## Actions\n{actions}\n"
+        "# Monster: {name}\n\n- Size: {size}\n- Type: {mtype}\n- Alignment: {alignment}\n- Armor Class (AC): {ac}\n- Hit Points (HP): {hp}\n- Challenge Rating (CR): {cr}\n\n## Ability Scores\nSTR {str_} | DEX {dex} | CON {con} | INT {int_} | WIS {wis} | CHA {cha}\n\n## Actions\n{actions}\n"
     )
 }
 

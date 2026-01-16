@@ -1,0 +1,43 @@
+Got it — I pulled up your newest terminal capture (terminalcapture_2026-01-16_1103.md) and everything is doing what we wanted:
+
+buildandtest.ps1 runs clean (fmt, clippy, tests).
+
+init-db reports schema v3.
+
+ingest works (sample rules went in as a new document).
+
+ingest-dnd5eapi works (25 spells + 25 monsters ingested).
+
+search is working and returning chunk IDs + snippets.
+
+show-chunk exists (great for debugging).
+
+Two small “polish” items showed up in the log that are worth fixing before we add ask:
+
+1) Why search "Armor Class" returned nothing
+
+Your monster renderer writes - AC: {ac} (and HP, CR), so searching for the words “Armor Class” won’t match anything.
+
+Quick fix: update the monster render text to include the natural-language label:
+
+- - AC: {ac}
+- - HP: {hp}
+- - CR: {cr}
++ - Armor Class (AC): {ac}
++ - Hit Points (HP): {hp}
++ - Challenge Rating (CR): {cr}
+
+
+That alone will make “Armor Class” searches behave how a human expects.
+
+2) The weird ΓÇª characters in snippets
+
+That’s coming from the FTS snippet(..., '…', ...) using a Unicode ellipsis. In your transcript it’s getting mangled.
+
+Quick fix: make the snippet ellipsis plain ASCII:
+
+- snippet(chunks_fts, 0, '[', ']', '…', 20) AS snip
++ snippet(chunks_fts, 0, '[', ']', '...', 20) AS snip
+
+
+(Everything else can stay the same.)
